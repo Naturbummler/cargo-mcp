@@ -51,13 +51,18 @@ Example line structure:
 
 import os
 import logging
+import re
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
 import httpx
 from fastmcp import FastMCP
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+
+from auth_config import build_entra_provider
 
 # Load environment variables from .env file
 load_dotenv()
@@ -72,17 +77,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse an opt-in boolean environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validated_resource_id(value: str) -> str:
+    """Restrict identifiers before interpolating them into upstream URL paths."""
+    if not _RESOURCE_ID_PATTERN.fullmatch(value):
+        raise ValueError("Invalid identifier")
+    return value
+
+
+def _port_from_env() -> int:
+    """Read Railway's dynamic port with a safe local default."""
+    try:
+        port = int(os.getenv("PORT", "8000"))
+    except ValueError as exc:
+        raise RuntimeError("PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError("PORT must be between 1 and 65535")
+    return port
+
 
 class Address(BaseModel):
     """Address information for shipper/consignee"""
+    model_config = ConfigDict(populate_by_name=True)
+
     post_code: str = Field(alias="postCode")
     country_code: str = Field(alias="countryCode")
     street: Optional[str] = None
     city: Optional[str] = None
-
-    class Config:
-        populate_by_name = True
-
 
 class ContactPerson(BaseModel):
     """Contact person information"""
@@ -93,17 +124,17 @@ class ContactPerson(BaseModel):
 
 class ShipperConsignee(BaseModel):
     """Shipper or consignee information"""
+    model_config = ConfigDict(populate_by_name=True)
+
     reference: str
     name: Optional[str] = None  # Required for orders, optional for quotations
     address: Address
     contact_person: Optional[ContactPerson] = Field(alias="contactPerson", default=None)
 
-    class Config:
-        populate_by_name = True
-
-
 class LineItem(BaseModel):
     """Line item for shipment"""
+    model_config = ConfigDict(populate_by_name=True)
+
     content: str
     unit_quantity: int = Field(alias="unitQuantity")
     unit_package_type: str = Field(alias="unitPackageType")
@@ -111,10 +142,6 @@ class LineItem(BaseModel):
     unit_width: float = Field(alias="unitWidth")
     unit_height: float = Field(alias="unitHeight")
     unit_weight: float = Field(alias="unitWeight")
-
-    class Config:
-        populate_by_name = True
-
 
 @dataclass
 class CargoboardConfig:
@@ -142,6 +169,15 @@ class CargoboardConfig:
 
         return headers
 
+    def validate(self) -> None:
+        """Fail before serving traffic when production configuration is unsafe."""
+        if not self.api_key:
+            raise RuntimeError("CARGOBOARD_API_KEY is required")
+        if not self.base_url.startswith("https://"):
+            raise RuntimeError("CARGOBOARD_BASE_URL must use HTTPS")
+        if self.timeout <= 0:
+            raise RuntimeError("CARGOBOARD_TIMEOUT must be greater than zero")
+
 
 class CargoboardClient:
     """HTTP client for Cargoboard API"""
@@ -168,9 +204,15 @@ class CargoboardClient:
             response = await self.client.get(endpoint, params=params)
             response.raise_for_status()
             return response.json()
-        except Exception as e:
-            logger.error(f"GET {endpoint} failed: {str(e)}")
-            raise
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Cargoboard GET failed with status %s",
+                exc.response.status_code,
+            )
+            raise RuntimeError("Cargoboard API request failed") from None
+        except (httpx.RequestError, ValueError):
+            logger.error("Cargoboard GET failed")
+            raise RuntimeError("Cargoboard API request failed") from None
 
     async def post(
         self, endpoint: str, json_data: Optional[Dict[str, Any]] = None
@@ -180,9 +222,15 @@ class CargoboardClient:
             response = await self.client.post(endpoint, json=json_data)
             response.raise_for_status()
             return response.json()
-        except Exception as e:
-            logger.error(f"POST {endpoint} failed: {str(e)}")
-            raise
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Cargoboard POST failed with status %s",
+                exc.response.status_code,
+            )
+            raise RuntimeError("Cargoboard API request failed") from None
+        except (httpx.RequestError, ValueError):
+            logger.error("Cargoboard POST failed")
+            raise RuntimeError("Cargoboard API request failed") from None
 
 
 # Initialize FastMCP server
@@ -208,13 +256,32 @@ def _add_optional_fields(data: dict, **kwargs) -> dict:
     return data
 
 
-app = FastMCP("Cargoboard Customer MCP Server")
+app = FastMCP(
+    "Cargoboard Customer MCP Server",
+    auth=build_entra_provider(),
+    mask_error_details=True,
+    tasks=False,
+)
 config = CargoboardConfig.from_env()
 
-logger.info(f"Starting Customer MCP Server - base_url: {config.base_url}")
+logger.info("Cargoboard MCP server configured")
 
 
-@app.tool
+@app.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health_check(request: Request) -> PlainTextResponse:
+    """Return a minimal unauthenticated liveness response for Railway."""
+    return PlainTextResponse("ok")
+
+
+@app.tool(
+    title="Create Cargoboard quotation",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
 async def create_quotation(
     product: str,
     # Shipper information (required)
@@ -386,7 +453,16 @@ async def create_quotation(
         return await client.post("/v1/quotations", json_data=quotation_data)
 
 
-@app.tool
+@app.tool(
+    title="Create Cargoboard order",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+    enabled=_env_flag("CARGOBOARD_ENABLE_WRITE_TOOLS", default=False),
+)
 async def create_order(
     product: str,
     # Shipper information (required for orders)
@@ -554,42 +630,70 @@ async def create_order(
         return await client.post("/v1/order", json_data=order_data)
 
 
-@app.tool
+@app.tool(
+    title="Get Cargoboard quotation",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
 async def get_quotation(quotation_id: str) -> Dict[str, Any]:
     """Get detailed information for a specific quotation
 
     Args:
         quotation_id: The unique identifier of the quotation
     """
+    safe_quotation_id = _validated_resource_id(quotation_id)
     async with CargoboardClient(config) as client:
-        return await client.get(f"/v1/quotations/{quotation_id}")
+        return await client.get(f"/v1/quotations/{safe_quotation_id}")
 
 
-@app.tool
+@app.tool(
+    title="Get Cargoboard order",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
 async def get_order(order_id: str) -> Dict[str, Any]:
     """Get detailed information for a specific order
 
     Args:
         order_id: The unique identifier of the order
     """
+    safe_order_id = _validated_resource_id(order_id)
     async with CargoboardClient(config) as client:
-        return await client.get(f"/v1/orders/{order_id}")
+        return await client.get(f"/v1/orders/{safe_order_id}")
 
 
-@app.tool
+@app.tool(
+    title="Get Cargoboard shipment labels",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
 async def print_shipment_labels(order_id: str) -> Dict[str, Any]:
     """Generate and print shipment labels for an order
 
     Args:
         order_id: The unique identifier of the order
     """
+    safe_order_id = _validated_resource_id(order_id)
     async with CargoboardClient(config) as client:
-        return await client.get(f"/v1/orders/{order_id}/print-shipment-labels")
+        return await client.get(
+            f"/v1/orders/{safe_order_id}/print-shipment-labels"
+        )
 
 
 if __name__ == "__main__":
     try:
-        app.run(transport="stdio")
-    except Exception as e:
-        logger.error(f"Failed to start Customer MCP server: {str(e)}")
-        raise
+        config.validate()
+        port = _port_from_env()
+        logger.info("Starting Cargoboard MCP server on configured HTTP port")
+        app.run(
+            transport="http",
+            host="0.0.0.0",
+            port=port,
+            path="/mcp",
+            show_banner=False,
+            stateless_http=True,
+            uvicorn_config={
+                "access_log": False,
+                "server_header": False,
+            },
+        )
+    except Exception:
+        logger.error("Cargoboard MCP server failed to start")
+        raise SystemExit(1) from None

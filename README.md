@@ -34,22 +34,104 @@ The MCP Server provides 5 essential tools:
    ```
 
 3. **Configure environment variables**
-   
-   Create a `.env` file in the project directory:
+
+   Copy `.env.example` to `.env` for local development and replace all
+   placeholders. Never commit the resulting `.env` file.
+
    ```bash
-   # Your Cargoboard API key (required)
-   CARGOBOARD_API_KEY=your_api_key_here
-   
-   # API endpoint (optional, defaults to production)
+   CARGOBOARD_API_KEY=replace-with-cargoboard-api-key
    CARGOBOARD_BASE_URL=https://api.cargoboard.com
-   
-   # Request timeout in seconds (optional, defaults to 30)
    CARGOBOARD_TIMEOUT=30
+   PORT=8000
+   ENTRA_CLIENT_ID=00000000-0000-0000-0000-000000000000
+   ENTRA_CLIENT_SECRET=replace-with-entra-client-secret-value
+   ENTRA_TENANT_ID=00000000-0000-0000-0000-000000000000
+   ENTRA_SCOPE=mcp.access
+   MCP_PUBLIC_BASE_URL=http://localhost:8000
+   OAUTH_JWT_SIGNING_KEY=replace-with-at-least-32-random-characters
+   OAUTH_STORAGE_BACKEND=memory
+   CARGOBOARD_ENABLE_WRITE_TOOLS=false
    ```
 
-### MCP Client Setup
+   `OAUTH_STORAGE_BACKEND=memory` is accepted only for a loopback URL. Railway
+   deployments must use Redis-backed encrypted OAuth storage as documented in
+   `.env.example`.
 
-Add the server to your MCP client configuration:
+### Microsoft Entra app registration
+
+Create a **single-tenant** app registration for the pilot:
+
+1. Add a Web redirect URI matching the MCP server origin plus
+   `/auth/callback`, for example `http://localhost:8000/auth/callback`.
+2. Under **Expose an API**, keep `api://<ENTRA_CLIENT_ID>` as the Application
+   ID URI and add the delegated scope `mcp.access`.
+3. In the manifest, set `api.requestedAccessTokenVersion` to `2`.
+4. Create a client secret and store only its **Value** in
+   `ENTRA_CLIENT_SECRET`.
+5. For production, set **Assignment required?** on the Enterprise Application
+   and assign only the approved users or group.
+
+The app registration callback is the MCP server's `/auth/callback`. Claude's
+hosted callback `https://claude.ai/api/mcp/auth_callback` is registered
+dynamically with the FastMCP OAuth proxy and is allowlisted by the server.
+
+### HTTP endpoint
+
+Start the Streamable HTTP server with:
+
+```bash
+uv run python server.py
+```
+
+The endpoints are:
+
+- `GET /health` returns only `ok` and does not require the secret.
+- `/mcp` is the OAuth-protected Streamable HTTP MCP endpoint.
+- OAuth discovery, registration, consent, token, and callback routes are
+  exposed by FastMCP as required by the MCP authorization specification.
+
+The server binds to `0.0.0.0` and reads its port from `PORT`, which Railway
+provides at runtime.
+
+### Claude.ai custom connector
+
+In organization settings, open **Connectors**, add a custom **Web** connector,
+and enter the Railway MCP URL:
+
+```text
+https://<railway-domain>/mcp
+```
+
+Leave Claude's optional OAuth Client ID and Client Secret fields empty. FastMCP
+supports Dynamic Client Registration and forwards the interactive login to the
+configured Microsoft Entra tenant. Every user must complete the Microsoft login
+and consent flow; requests without a valid access token receive `401`.
+
+### Local OAuth smoke test
+
+With the server running and the localhost callback registered in Entra, start
+the interactive test client in another terminal:
+
+```bash
+uv run python scripts/test_oauth.py
+```
+
+The browser opens the Microsoft login and consent flow. After a successful
+login, the script prints only the available tool names; it never prints access
+tokens or credentials. `create_order` must not appear while
+`CARGOBOARD_ENABLE_WRITE_TOOLS=false`.
+
+### Write-tool safety
+
+`create_order` is hidden by default. It is exposed only when
+`CARGOBOARD_ENABLE_WRITE_TOOLS=true`. Quotations remain available because they
+are explicitly allowed for the pilot. Do not enable order creation without a
+separate operational approval.
+
+### Legacy stdio client setup
+
+The hosted server uses HTTP. To run the same tool implementation locally over
+stdio, use FastMCP's CLI instead of `python server.py`:
 
 ```json
 {
@@ -58,47 +140,17 @@ Add the server to your MCP client configuration:
       "command": "uv",
       "args": [
         "run",
-        "--with",
-        "fastmcp",
         "fastmcp",
         "run",
-        "/absolute/path/to/server.py"
+        "/absolute/path/to/server.py:app"
       ]
     }
   }
 }
 ```
 
-**Important Notes:**
-- Replace `/absolute/path/to/server.py` with the actual absolute path to your server.py file
-- You can include environment variables directly in the config or use the `.env` file
-- Ensure the path uses forward slashes even on Windows
-
-### Alternative Configuration (with environment variables)
-
-If you prefer to include environment variables directly in the configuration:
-
-```json
-{
-  "mcpServers": {
-    "cargo-mcp": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--with",
-        "fastmcp",
-        "fastmcp",
-        "run",
-        "/absolute/path/to/server.py"
-      ],
-      "env": {
-        "CARGOBOARD_API_KEY": "your_api_key_here",
-        "CARGOBOARD_BASE_URL": "https://api.cargoboard.com"
-      }
-    }
-  }
-}
-```
+Replace `/absolute/path/to/server.py` with the actual path and provide the
+Cargoboard environment variables through a local `.env` file.
 
 ## Usage Guide
 
