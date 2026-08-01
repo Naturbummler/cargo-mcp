@@ -57,6 +57,7 @@ from dataclasses import dataclass
 
 import httpx
 from fastmcp import FastMCP
+from mcp.types import Icon
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request
@@ -257,7 +258,18 @@ def _add_optional_fields(data: dict, **kwargs) -> dict:
 
 
 app = FastMCP(
-    "Cargoboard Customer MCP Server",
+    "Naturbummler Cargoboard",
+    website_url="https://naturbummler.de",
+    icons=[
+        Icon(
+            src=(
+                "https://naturbummler.de/cdn/shop/files/"
+                "1000x628px_Logo_1000x628.png"
+            ),
+            mimeType="image/png",
+            sizes=["1000x628"],
+        )
+    ],
     auth=build_entra_provider(),
     mask_error_details=True,
     tasks=False,
