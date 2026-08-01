@@ -34,6 +34,16 @@ class CargoboardServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.text, "ok")
 
+    def test_branding_metadata_uses_public_logo(self):
+        self.assertEqual(self.server.app.name, "Naturbummler Cargoboard")
+        self.assertEqual(self.server.app.website_url, "https://naturbummler.de")
+        self.assertEqual(
+            str(self.server.app.icons[0].src),
+            "https://naturbummler.de/cdn/shop/files/"
+            "1000x628px_Logo_1000x628.png",
+        )
+        self.assertEqual(self.server.app.icons[0].mimeType, "image/png")
+
     def test_mcp_endpoint_requires_oauth(self):
         self.assertEqual(self.client.get("/").status_code, 404)
         response = self.client.post(
