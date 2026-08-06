@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import os
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from starlette.testclient import TestClient
 
@@ -67,10 +68,90 @@ class CargoboardServerTests(unittest.TestCase):
         }
 
         self.assertIn("create_quotation", tools)
+        self.assertIn("list_orders", tools)
+        self.assertIn("list_quotations", tools)
         self.assertIn("get_quotation", tools)
         self.assertIn("get_order", tools)
         self.assertIn("print_shipment_labels", tools)
         self.assertNotIn("create_order", tools)
+
+        self.assertTrue(tools["list_orders"].annotations.readOnlyHint)
+        self.assertTrue(tools["list_quotations"].annotations.readOnlyHint)
+
+    def test_list_query_parameters_are_bounded_and_mapped(self):
+        params = self.server._list_query_params(
+            take=25,
+            cursor=100,
+            order_by=["sequence"],
+            filters=["status=CREATED"],
+            filter_operator="or",
+            include_total=True,
+        )
+
+        self.assertEqual(
+            params,
+            {
+                "take": 25,
+                "cursor": 100,
+                "orderBy": ["sequence"],
+                "filter": ["status=CREATED"],
+                "filterOperator": "OR",
+                "total": True,
+            },
+        )
+
+    def test_list_query_rejects_unbounded_or_invalid_values(self):
+        defaults = {
+            "take": 25,
+            "cursor": None,
+            "order_by": None,
+            "filters": None,
+            "filter_operator": "AND",
+            "include_total": False,
+        }
+
+        for override in (
+            {"take": 0},
+            {"take": 51},
+            {"cursor": -1},
+            {"filter_operator": "XOR"},
+            {"filters": ["status=CREATED\nignored=true"]},
+            {"order_by": ["field"] * 11},
+        ):
+            with self.subTest(override=override):
+                with self.assertRaises(ValueError):
+                    self.server._list_query_params(**(defaults | override))
+
+    def test_list_tools_call_the_collection_endpoints(self):
+        cases = (
+            (self.server.list_orders, "/v1/orders"),
+            (self.server.list_quotations, "/v1/quotations"),
+        )
+
+        for tool, endpoint in cases:
+            with self.subTest(tool=tool.name):
+                mocked_get = AsyncMock(return_value={"items": []})
+                with patch.object(
+                    self.server.CargoboardClient,
+                    "get",
+                    mocked_get,
+                ):
+                    result = asyncio.run(
+                        tool.fn(
+                            take=10,
+                            cursor=20,
+                            order_by=None,
+                            filters=None,
+                            filter_operator="AND",
+                            include_total=False,
+                        )
+                    )
+
+                self.assertEqual(result, {"items": []})
+                mocked_get.assert_awaited_once_with(
+                    endpoint,
+                    params={"take": 10, "cursor": 20, "total": False},
+                )
 
     def test_oauth_discovery_is_public_but_does_not_expose_tools(self):
         response = self.client.get("/.well-known/oauth-protected-resource/mcp")
