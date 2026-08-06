@@ -4,8 +4,10 @@ A Model Context Protocol (MCP) server for the Cargoboard shipping API. This serv
 
 ## Features
 
-The MCP Server provides 5 essential tools:
+The MCP Server provides 7 essential tools:
 
+- **list_orders** - List orders and discover their API CUID/reference
+- **list_quotations** - List quotations and discover their API ID
 - **create_quotation** - Create shipping quotation requests
 - **create_order** - Create shipping orders  
 - **get_quotation** - Retrieve quotation details
@@ -127,6 +129,19 @@ tokens or credentials. `create_order` must not appear while
 `CARGOBOARD_ENABLE_WRITE_TOOLS=true`. Quotations remain available because they
 are explicitly allowed for the pilot. Do not enable order creation without a
 separate operational approval.
+
+### Discovering order and quotation IDs
+
+Use `list_orders` before `get_order` when only a display number is known. The
+Cargoboard detail endpoint accepts the API CUID in `id` or the order
+`reference`; values such as `sequence` or an ERP order number are not
+interchangeable with those identifiers. `list_quotations` provides the same
+discovery step for quotation IDs.
+
+Both list tools are read-only and return at most 50 records per call. Use the
+returned cursor to request subsequent pages. Optional `order_by` and `filters`
+values are forwarded as Cargoboard query expressions after applying count,
+length, and control-character limits.
 
 ### Legacy stdio client setup
 

@@ -79,6 +79,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_MAX_LIST_PAGE_SIZE = 50
+_MAX_LIST_QUERY_ITEMS = 10
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -94,6 +96,77 @@ def _validated_resource_id(value: str) -> str:
     if not _RESOURCE_ID_PATTERN.fullmatch(value):
         raise ValueError("Invalid identifier")
     return value
+
+
+def _validated_query_values(
+    values: Optional[list[str]],
+    *,
+    name: str,
+    max_length: int,
+) -> Optional[list[str]]:
+    """Validate bounded query values before forwarding them upstream."""
+    if values is None:
+        return None
+    if not values or len(values) > _MAX_LIST_QUERY_ITEMS:
+        raise ValueError(
+            f"{name} must contain between 1 and {_MAX_LIST_QUERY_ITEMS} values"
+        )
+
+    validated = []
+    for value in values:
+        normalized = value.strip()
+        if (
+            not normalized
+            or len(normalized) > max_length
+            or any(ord(character) < 32 for character in normalized)
+        ):
+            raise ValueError(f"{name} contains an invalid value")
+        validated.append(normalized)
+    return validated
+
+
+def _list_query_params(
+    *,
+    take: int,
+    cursor: Optional[int],
+    order_by: Optional[list[str]],
+    filters: Optional[list[str]],
+    filter_operator: str,
+    include_total: bool,
+) -> Dict[str, Any]:
+    """Build bounded Cargoboard list query parameters."""
+    if not 1 <= take <= _MAX_LIST_PAGE_SIZE:
+        raise ValueError(f"take must be between 1 and {_MAX_LIST_PAGE_SIZE}")
+    if cursor is not None and cursor < 0:
+        raise ValueError("cursor must be zero or greater")
+
+    operator = filter_operator.strip().upper()
+    if operator not in {"AND", "OR"}:
+        raise ValueError("filter_operator must be AND or OR")
+
+    safe_order_by = _validated_query_values(
+        order_by,
+        name="order_by",
+        max_length=64,
+    )
+    safe_filters = _validated_query_values(
+        filters,
+        name="filters",
+        max_length=256,
+    )
+
+    params: Dict[str, Any] = {
+        "take": take,
+        "total": include_total,
+    }
+    if cursor is not None:
+        params["cursor"] = cursor
+    if safe_order_by is not None:
+        params["orderBy"] = safe_order_by
+    if safe_filters is not None:
+        params["filter"] = safe_filters
+        params["filterOperator"] = operator
+    return params
 
 
 def _port_from_env() -> int:
@@ -283,6 +356,82 @@ logger.info("Cargoboard MCP server configured")
 async def health_check(request: Request) -> PlainTextResponse:
     """Return a minimal unauthenticated liveness response for Railway."""
     return PlainTextResponse("ok")
+
+
+@app.tool(
+    title="List Cargoboard orders",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
+async def list_orders(
+    take: int = 25,
+    cursor: Optional[int] = None,
+    order_by: Optional[list[str]] = None,
+    filters: Optional[list[str]] = None,
+    filter_operator: str = "AND",
+    include_total: bool = False,
+) -> Dict[str, Any]:
+    """List orders visible to the configured Cargoboard API key.
+
+    Use this tool before ``get_order`` when the API CUID or order reference is
+    unknown. The response distinguishes the API ``id``/CUID and ``reference``
+    from display-oriented values such as ``sequence``. Pass the returned
+    ``id`` or ``reference`` to ``get_order``.
+
+    Args:
+        take: Number of orders to return, from 1 to 50.
+        cursor: Non-negative cursor returned by a previous list response.
+        order_by: Optional Cargoboard orderBy expressions, at most 10.
+        filters: Optional Cargoboard filter expressions, at most 10.
+        filter_operator: How multiple filters are combined: AND or OR.
+        include_total: Ask Cargoboard to include the total result count.
+    """
+    params = _list_query_params(
+        take=take,
+        cursor=cursor,
+        order_by=order_by,
+        filters=filters,
+        filter_operator=filter_operator,
+        include_total=include_total,
+    )
+    async with CargoboardClient(config) as client:
+        return await client.get("/v1/orders", params=params)
+
+
+@app.tool(
+    title="List Cargoboard quotations",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
+async def list_quotations(
+    take: int = 25,
+    cursor: Optional[int] = None,
+    order_by: Optional[list[str]] = None,
+    filters: Optional[list[str]] = None,
+    filter_operator: str = "AND",
+    include_total: bool = False,
+) -> Dict[str, Any]:
+    """List quotations visible to the configured Cargoboard API key.
+
+    Use this tool before ``get_quotation`` when the quotation ID is unknown.
+    Pass the API ``id`` returned here to ``get_quotation``.
+
+    Args:
+        take: Number of quotations to return, from 1 to 50.
+        cursor: Non-negative cursor returned by a previous list response.
+        order_by: Optional Cargoboard orderBy expressions, at most 10.
+        filters: Optional Cargoboard filter expressions, at most 10.
+        filter_operator: How multiple filters are combined: AND or OR.
+        include_total: Ask Cargoboard to include the total result count.
+    """
+    params = _list_query_params(
+        take=take,
+        cursor=cursor,
+        order_by=order_by,
+        filters=filters,
+        filter_operator=filter_operator,
+        include_total=include_total,
+    )
+    async with CargoboardClient(config) as client:
+        return await client.get("/v1/quotations", params=params)
 
 
 @app.tool(
