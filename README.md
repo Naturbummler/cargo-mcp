@@ -73,9 +73,19 @@ Create a **single-tenant** app registration for the pilot:
 5. For production, set **Assignment required?** on the Enterprise Application
    and assign only the approved users or group.
 
-The app registration callback is the MCP server's `/auth/callback`. Claude's
-hosted callback `https://claude.ai/api/mcp/auth_callback` is registered
-dynamically with the FastMCP OAuth proxy and is allowlisted by the server.
+The app registration callback is the MCP server's `/auth/callback`. Claude
+registers its hosted callback (`https://claude.ai/api/mcp/auth_callback` or
+`https://claude.com/api/mcp/auth_callback`) dynamically with the OAuth proxy.
+
+Dynamically registered clients may only use callbacks on the allowlist
+(`MCP_ALLOWED_REDIRECT_URIS`; default: the two Claude callbacks, plus loopback
+callbacks when the server itself runs on a loopback URL). FastMCP 2.14 does not
+enforce this on its own: it treats `allowed_client_redirect_uris` as an addition
+to whatever a client registered for itself. `AllowlistedAzureProvider` in
+`auth_config.py` therefore rejects other callbacks at `/register` (HTTP 400,
+`invalid_redirect_uri`) and at `/authorize`, and no longer recognizes stored
+clients that carry a callback outside the allowlist. Entries without `*` must
+match exactly.
 
 ### HTTP endpoint
 
